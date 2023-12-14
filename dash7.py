@@ -1,20 +1,18 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# In[18]:
 
-
-# dashboard.py
 
 import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output, State, ALL
-from flask import Flask, jsonify, request
 import pandas as pd
 import plotly.graph_objs as go
 import joblib
 import shap
 import numpy as np
+import flask
 
 # Charger le modèle, le scaler et le seuil optimal
 model = joblib.load('best_lgbm_model.pkl')
@@ -27,15 +25,13 @@ clients_data = pd.read_csv('X_test_select.csv')
 # Initialisation de l'expliqueur SHAP
 explainer = shap.TreeExplainer(model)
 
-# Initialisation de l'application Flask
-server = Flask(__name__)
-
 # Initialisation de l'application Dash
-app = dash.Dash(__name__, server=server)
+app = dash.Dash(__name__)
+server = app.server  # Expose the Flask server
 
 # Styles pour le bouton et la prédiction
 button_style = {
-    'background-color': '#4CAF50',
+    'background-color': '#A9A9A9',  # Green
     'color': 'white',
     'height': '50px',
     'width': '100%',
@@ -51,8 +47,7 @@ button_style = {
 prediction_style_default = {
     'margin-top': '20px',
     'font-size': '20px',
-    'font-weight': 'bold',
-    'text-align': 'center'
+    'font-weight': 'bold'
 }
 
 # Définition de la mise en page de l'application
@@ -63,10 +58,27 @@ app.layout = html.Div([
         value=clients_data['sk_id_curr'].iloc[0]
     ),
     html.Div(id='client-data-inputs'),
-    html.Button('Mettre à jour la prédiction', id='predict-button', n_clicks=0, style=button_style),
+    html.Button('RESULTAT', id='predict-button', n_clicks=0, style=button_style),
     html.Div(id='prediction-output', style=prediction_style_default),
     dcc.Graph(id='score-gauge'),
-    # ... [Autres composants de l'interface utilisateur]
+
+
+    dcc.Dropdown(
+        id='feature-view-dropdown',
+        options=[{'label': col, 'value': col} for col in clients_data.columns if col != 'sk_id_curr'],
+        value=clients_data.columns[1]
+    ),
+    dcc.Graph(id='feature-view-graph'),
+
+    dcc.Dropdown(
+        id='feature-dropdown',
+        options=[{'label': col, 'value': col} for col in clients_data.columns if col != 'sk_id_curr'],
+        value=clients_data.columns[1]
+    ),
+    dcc.Graph(id='client-comparison'),
+
+    dcc.Graph(id='global-feature-importance'),
+    dcc.Graph(id='local-feature-importance')
 ])
 
 # Fonction de rappel pour peupler les entrées de données du client en fonction du client sélectionné
@@ -76,7 +88,7 @@ app.layout = html.Div([
 )
 def update_client_data_inputs(selected_sk_id):
     selected_client_data = clients_data[clients_data['sk_id_curr'] == selected_sk_id].iloc[0]
-    return [
+    return html.Div([
         html.Div([
             html.Label(col),
             dcc.Input(
@@ -85,9 +97,8 @@ def update_client_data_inputs(selected_sk_id):
                 id={'type': 'input-field', 'index': col}
             )
         ]) for col in selected_client_data.index if col != 'sk_id_curr'
-    ]
+    ])
 
-# Fonctions de rappel pour mettre à jour la prédiction et les graphiques
 # Fonction de rappel pour mettre à jour la prédiction et tous les graphiques
 @app.callback(
     [Output('prediction-output', 'children'),
@@ -172,32 +183,33 @@ def update_all_graphs(n_clicks, selected_feature_view, selected_feature_compare,
 
     return prediction_text, gauge_chart, feature_value_graph, comparison_graph, global_importance_graph, local_importance_graph
 
+# Route Flask pour l'API qui reçoit un id_client et renvoie le pourcentage d'acceptation
+@server.route('/get_acceptance', methods=['POST'])
+def get_acceptance():
+    data = flask.request.get_json()
+    id_client = int(data['id_client'])  # Convertir l'ID client en entier
 
-# Définition d'une route API pour obtenir le score d'un client
-@server.route('/get_score', methods=['POST'])
-def get_score():
-    data = request.get_json()
-    id_client = data['id_client']
     client_data = clients_data[clients_data['sk_id_curr'] == id_client]
-    
+
     if client_data.empty:
-        response = {
-            'message': 'Client not found'
-        }
-        return jsonify(response), 404
-    
+        return flask.jsonify({"error": "Client not found"}), 404
+
     # Préparation des données pour la prédiction
     client_data = client_data.drop(columns=['sk_id_curr'])
     client_data_scaled = scaler.transform(client_data)
-    
-    # Obtention du score
-    score = model.predict_proba(client_data_scaled)[0][1]
-    
-    response = {
-        'id_client': int(id_client),
-        'score': score
-    }
-    return jsonify(response), 200
+
+    # Obtention du pourcentage d'acceptation
+    acceptance_probability = model.predict_proba(client_data_scaled)[0][1]
+    acceptance_percentage = "{:.2f}%".format(acceptance_probability * 100)  # Multiplié par 100 pour avoir un pourcentage
+
+    # Utilisation du seuil 'best_threshold' pour déterminer le type de client
+    client_type = "Difficult" if acceptance_probability > best_threshold else "Non Difficult"
+
+    return flask.jsonify({
+        "id_client": id_client,
+        "acceptance_percentage": acceptance_percentage,
+        "client_type": client_type
+    })
 
 # Exécution de l'application
 if __name__ == '__main__':
